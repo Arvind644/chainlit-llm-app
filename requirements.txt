@@ -3,9 +3,10 @@ openai==1.2.3
 langchain
 langchain_openai
 langchain_community
+langchain_chroma
 chainlit
 tiktoken==0.5.1
 pdfplumber
 chromadb==0.4.17
-pysqlite3-binary==0.5.2.post1
+pysqlite3-binary
 ruff==0.1.5
