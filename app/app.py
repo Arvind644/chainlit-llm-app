@@ -1,3 +1,5 @@
+# Chroma compatibility issue resolution
+# https://docs.trychroma.com/troubleshooting#sqlite
 __import__("pysqlite3")
 import sys
 
@@ -13,18 +15,18 @@ import chromadb
 from chromadb.config import Settings
 from langchain_openai import ChatOpenAI
 from langchain_community.embeddings import OpenAIEmbeddings
-from langchain.schema.embeddings import Embeddings
-# from langchain_core.embeddings import Embeddings
-# from langchain_community.vectorstores import Chroma
+# from langchain.schema.embeddings import Embeddings
 from langchain_chroma import Chroma
 from langchain.vectorstores.base import VectorStore
-
-from langchain_core.prompts import ChatPromptTemplate
-from langchain.schema import Document, StrOutputParser
-from langchain.chains import LLMChain, RetrievalQAWithSourcesChain
+from langchain.schema import Document
+from langchain.chains import RetrievalQAWithSourcesChain
 
 from langchain_community.document_loaders import PDFPlumberLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter 
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+from prompt import EXAMPLE_PROMPT, PROMPT, WELCOME_MESSAGE
+
+namespaces = set()
 
 chromadb.api.client.SharedSystemClient.clear_system_cache()
 
@@ -55,92 +57,79 @@ def process_file(*, file: AskFileResponse) -> List[Document]:
         return docs
 
 
-def create_search_engine(*, docs: List[Document], embeddings: Embeddings) -> VectorStore:
-
+def create_search_engine(*, file: AskFileResponse) -> VectorStore:
+    
+    # Process and save data in the user session
+    docs = process_file(file=file)
+    cl.user_session.set("docs", docs)
+    
+    encoder = OpenAIEmbeddings(
+        model="text-embedding-ada-002"
+    )
+    
+    # Initialize Chromadb client and settings, reset to ensure we get a clean
+    # search engine
     client = chromadb.EphemeralClient()
-    client_settings = Settings(allow_reset=True, anonymized_telemetry=False)
-
-    # Reset the search engine to ensure we don't use old copies.
-    # NOTE: we do not need this for production
-    search_engine = Chroma(client=client, client_settings=client_settings)
+    client_settings=Settings(
+        allow_reset=True,
+        anonymized_telemetry=False
+    )
+    search_engine = Chroma(
+        client=client,
+        client_settings=client_settings
+    )
     search_engine._client.reset()
 
     search_engine = Chroma.from_documents(
         client=client,
         documents=docs,
-        # embeddings=embeddings,
-        embedding_function=embeddings,
-        client_settings=client_settings,
+        embedding=encoder,
+        client_settings=client_settings 
     )
 
     return search_engine
 
+
 @cl.on_chat_start
-async def on_chat_start():
+async def start():
 
     files = None
     while files is None:
         files = await cl.AskFileMessage(
-            content="Please Upload the PDF file you want to chat with...",
+            content=WELCOME_MESSAGE,
             accept=["application/pdf"],
-            max_size_mb=10,
+            max_size_mb=20,
         ).send()
+  
     file = files[0]
-
     msg = cl.Message(content=f"Processing `{file.name}`...")
     await msg.send()
 
-    docs = process_file(file=file)
-    cl.user_session.set("docs", docs)
-    msg.content = f"`{file.name}` processed. Loading..."
-    await msg.update()
-
-    # Indexing documents into our search engine
-    embeddings = OpenAIEmbeddings(
-        model="text-embedding-ada-002"
-    )
-
     try:
-        search_engine = await cl.make_async(create_search_engine)(
-            docs=docs,
-            embeddings=embeddings
-        )
+        search_engine = await cl.make_async(create_search_engine)(file=file)
     except Exception as e:
         await cl.Message(content=f"Error: {e}").send()
         raise SystemError
-    msg.content = f"`{file.name}` loaded. You can now ask questions!"
-    await msg.update()
 
-    model = ChatOpenAI(
-        model="gpt-4o-mini",
+    llm = ChatOpenAI(
+        model='gpt-4o-mini',
         temperature=0,
         streaming=True
     )
 
     chain = RetrievalQAWithSourcesChain.from_chain_type(
-        llm=model,
+        llm=llm,
         chain_type="stuff",
         retriever=search_engine.as_retriever(max_tokens_limit=4097),
+
+        chain_type_kwargs={
+            "prompt": PROMPT,
+            "document_prompt": EXAMPLE_PROMPT
+        },
     )
 
-    # prompt = ChatPromptTemplate.from_messages(
-    #      [
-    #         (
-    #             "system",
-    #             "You are Chainlit GPT, a helpful assistant.",
-    #         ),
-    #         (
-    #             "human",
-    #             "{question}"
-    #         ),
-    #     ]
-    # )
-
-    # chain = LLMChain(
-    #     llm=model,
-    #     prompt=prompt,
-    #     output_parser=StrOutputParser()
-    # )
+    msg.content = f"`{file.name}` processed. You can now ask questions!"
+    await msg.update()
 
     cl.user_session.set("chain", chain)
 
@@ -148,23 +137,19 @@ async def on_chat_start():
 @cl.on_message
 async def main(message: cl.Message):
 
-    chain = cl.user_session.get("chain")
-
-    response = await chain.arun(
-        question=message.content,
-        callbacks=[cl.LangchainCallbackHandler(stream_final_answer=True)]
-    )
-
-    answer = response["anwer"]
+    chain = cl.user_session.get("chain")  # type: ConversationalRetrievalChain
+    cb = cl.AsyncLangchainCallbackHandler()
+    response = await chain.acall(message.content, callbacks=[cb])
+    answer = response["answer"]
     sources = response["sources"].strip()
+    source_elements = []
 
-    # Get all of the documents from user session
+    # Get the documents from the user session
     docs = cl.user_session.get("docs")
     metadatas = [doc.metadata for doc in docs]
     all_sources = [m["source"] for m in metadatas]
 
     # Adding sources to the answer
-    source_elements = []
     if sources:
         found_sources = []
 
