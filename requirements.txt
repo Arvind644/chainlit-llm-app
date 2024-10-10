@@ -7,6 +7,6 @@ langchain_chroma
 chainlit
 tiktoken==0.5.1
 pdfplumber
-chromadb==0.4.17
+chromadb==0.5
 pysqlite3-binary
 ruff==0.1.5
