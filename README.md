@@ -23,7 +23,15 @@ Then for starting the application
 chainlit run app/app.py -w
 ```
 
-Future steps: 
+## Application UI
+
+![img1](/images/chainlit1.png)
+![img2](/images/chainlit2.png)
+![img3](/images/chainlit3.png)
+
+
+
+## Future steps
 
 - Create a react frontend with chainlit backend
 - Add more LLM to the application.
